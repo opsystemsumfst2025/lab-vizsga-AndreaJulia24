@@ -42,11 +42,9 @@ static pthread_cond_t buffer_cond=PTHREAD_COND_INITIALIZER; //race condition elk
 // - transaction_head pointer
 static Transaction* transaction_head=NULL;
 // - running flag (volatile sig_atomic_t)
-static volatile sig_atomic_t running = 0;
+static volatile sig_atomic_t running = 1;
 // - market_pid
 static pid_t market_pid;
-
-static pthread_mutex_t list_mutex=PTHREAD_MUTEX_INITIALIZER;
 
 static void die(const char *msg){
 	perror(msg);
@@ -79,7 +77,7 @@ static void add_transaction(const char* type,const char* stock,int quant, double
 static void print_transactions(){
 	printf("\n===Tranzakcios Naplo===\n");
 
-	pthread_mutex_lock(&list_mutex);
+	pthread_mutex_lock(&transaction_mutex);
 	
 	Transaction *current=transaction_head;
 	int count=0;
@@ -89,12 +87,12 @@ static void print_transactions(){
 	}
 
 	while(current != NULL){
-	   printf("[%s] %-5s: %d db @  %.2f $\n",current->type, current->stock,
+	   printf("[%s] %-5s: %d db | %.2f $\n",current->type, current->stock,
 	   current->quantity, current->price);
 	   current=current->next;
 	   count++;
 	}
-   	 pthread_mutex_unlock(&list_mutex);
+   	 pthread_mutex_unlock(&transaction_mutex);
    
 	 printf("==============================================\n");
 	 printf("Osszesen %d tranzakcio kerult rogzitesre.\n",count);
@@ -105,7 +103,7 @@ static void print_transactions(){
 // Ez kell a Valgrind tiszta kimenethez!
 //4.ALPONT: memoria felszabaditasa
 static void free_transactions(){
-	pthread_mutex_lock(&list_mutex);
+	pthread_mutex_lock(&transaction_mutex);
 	Transaction* current=transaction_head;
 	while(current){
 	   Transaction *temp=current;
@@ -113,6 +111,7 @@ static void free_transactions(){
 	   free(temp);
 	}
    transaction_head=NULL;
+   pthread_mutex_unlock(&transaction_mutex);
 }
 
 // TODO: Signal handler (SIGINT)
@@ -186,16 +185,16 @@ static void* trader_thread(void* arg){
 	if(wallet_balance >= current_data.price){
 		wallet_balance -= current_data.price;
 		stocks_owned++;
-		printf("[Trader %d] VETEL: %s @ %2.f $ |Egyenleg: %2.f $\n", id, 
+		printf("[Trader %d] VETEL: %s | %2.f $ |Egyenleg: %2.f $\n", id, 
 		current_data.stock, current_data.price, wallet_balance);
 		add_transaction("VETEL",current_data.stock,1,current_data.price);
 	}
 	else if(stocks_owned > 0){
 		wallet_balance += current_data.price;
 		stocks_owned--;
-		printf("[Trader %d] ELADAS: %s @ %2.f $ |Egyenleg: %2.f $\n", id,
+		printf("[Trader %d] ELADAS: %s | %2.f $ |Egyenleg: %2.f $\n", id,
 		current_data.stock,current_data.price, wallet_balance);
-		add_transaction("VETEL",current_data.stock,1,current_data.price);
+		add_transaction("ELADAS",current_data.stock,1,current_data.price);
 	}
 	pthread_mutex_unlock(&wallet_mutex);
 	//fflush(stdout); //azonnali terminal kiiras kenyszeritese
@@ -260,10 +259,10 @@ int main() {
     
     // TODO: Master ciklust
     char read_buff[128];
-    while(running){
+    while(1){
     	 ssize_t n=read(pipe_fd[0],read_buff,sizeof(read_buff) - 1);
     	 if(n<=0){
-   	   break;
+   	   break; //csak akkor lepunk ki ha a pipe lezarult
    	 }
    
 	 read_buff[n] = '\0';
@@ -287,11 +286,17 @@ int main() {
    }
     
     // TODO: Cleanup + vegso kiirasok
-    
+   //egy utolso jelzes a szalaknak hogy biztosra eszrevegyek a leallast
+   pthread_mutex_lock(&buffer_mutex);
+   pthread_cond_broadcast(&buffer_cond);
+   pthread_mutex_unlock(&buffer_mutex);
+   
+   //kereskedo szalak bevarasa
    for(int i=0;i<NUM_TRADERS;i++){
     pthread_join(traders[i], NULL);
    }
-	
+   
+   //gyerek folyamat bevarasa
    waitpid(market_pid,NULL,0);
    close(pipe_fd[0]);
    
@@ -302,7 +307,6 @@ int main() {
    print_transactions(); //naplozas
 
    printf("\n=======================================\n");
-  // fflush(stdout);
 
    free_transactions();
    
